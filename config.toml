@@ -3,7 +3,7 @@ base_unc = "\\\\mskfs.rusagrotrans.ru\\Groups\\Департамент транс
 
 [schedule]
 timezone = "Europe/Moscow"
-hour = 7
+hour = 4
 minute = 0
 
 [ssh]
