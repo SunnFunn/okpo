@@ -6,6 +6,9 @@ use chrono::{Datelike, NaiveDate};
 use regex::Regex;
 use std::sync::OnceLock;
 
+/// Сколько самых свежих реестров забирать за один автопрогон.
+pub const PACKAGE_SIZE: usize = 4;
+
 const MONTH_NAMES_RU: [&str; 12] = [
     "Январь",
     "Февраль",
@@ -73,13 +76,34 @@ fn folder_for_date(base: &Path, date: NaiveDate) -> PathBuf {
     base.join(year_folder_name(date)).join(month_folder_name(date))
 }
 
-/// Среди файлов в папке выбирает реестр с максимальной датой строго меньше `today`.
-pub fn pick_latest_before_today(dir: &Path, today: NaiveDate) -> Result<PathBuf> {
+/// Папки месяцев для пакета: месяц «вчера» и предыдущий месяц
+/// (в начале месяца / года пакет перекрывает две соседние папки).
+pub fn month_folders_for_package(base: &Path, today: NaiveDate) -> Vec<PathBuf> {
+    let target = target_register_date(today);
+    let current = folder_for_date(base, target);
+
+    let prev_month_day = NaiveDate::from_ymd_opt(target.year(), target.month(), 1)
+        .and_then(|d| d.pred_opt());
+
+    let mut dirs = vec![current];
+    if let Some(prev) = prev_month_day {
+        let prev_dir = folder_for_date(base, prev);
+        if prev_dir != dirs[0] {
+            dirs.push(prev_dir);
+        }
+    }
+    dirs
+}
+
+/// Реестры в одной папке с датой строго меньше `today`.
+pub fn collect_registers_before_today(
+    dir: &Path,
+    today: NaiveDate,
+) -> Result<Vec<(NaiveDate, PathBuf)>> {
     let entries = fs::read_dir(dir)
         .with_context(|| format!("не удалось прочитать каталог {}", dir.display()))?;
 
-    let mut best: Option<(NaiveDate, PathBuf)> = None;
-
+    let mut out = Vec::new();
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
@@ -99,46 +123,77 @@ pub fn pick_latest_before_today(dir: &Path, today: NaiveDate) -> Result<PathBuf>
         if file_date >= today {
             continue;
         }
-
-        match &best {
-            Some((best_date, _)) if file_date <= *best_date => {}
-            _ => best = Some((file_date, path)),
-        }
+        out.push((file_date, path));
     }
-
-    best.map(|(_, path)| path).with_context(|| {
-        format!(
-            "в {} нет файлов реестра с датой раньше {}",
-            dir.display(),
-            today
-        )
-    })
+    Ok(out)
 }
 
-/// Автопоиск реестра на UNC по правилам плана.
-pub fn discover_latest(base_unc: &str, today: NaiveDate) -> Result<PathBuf> {
-    let target = target_register_date(today);
-    let base = PathBuf::from(base_unc);
-    let dir = folder_for_date(&base, target);
+/// Среди файлов в папке выбирает реестр с максимальной датой строго меньше `today`.
+pub fn pick_latest_before_today(dir: &Path, today: NaiveDate) -> Result<PathBuf> {
+    let mut files = collect_registers_before_today(dir, today)?;
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files
+        .into_iter()
+        .next()
+        .map(|(_, path)| path)
+        .with_context(|| {
+            format!(
+                "в {} нет файлов реестра с датой раньше {}",
+                dir.display(),
+                today
+            )
+        })
+}
 
-    if !dir.is_dir() {
+/// Автопоиск пакета из [`PACKAGE_SIZE`] самых свежих реестров (дата раньше сегодняшней).
+///
+/// Смотрит папку месяца «вчера» и папку предыдущего месяца, чтобы в начале
+/// месяца набрать 4 файла с двух соседних месяцев.
+pub fn discover_latest_package(base_unc: &str, today: NaiveDate) -> Result<Vec<PathBuf>> {
+    let base = PathBuf::from(base_unc);
+    let dirs = month_folders_for_package(&base, today);
+
+    tracing::info!(
+        "поиск пакета из {} реестров (сегодня {}), папки: {}",
+        PACKAGE_SIZE,
+        today,
+        dirs.iter()
+            .map(|d| d.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let mut all: Vec<(NaiveDate, PathBuf)> = Vec::new();
+    for dir in &dirs {
+        if !dir.is_dir() {
+            tracing::warn!("каталог реестров не найден, пропускаем: {}", dir.display());
+            continue;
+        }
+        let found = collect_registers_before_today(dir, today)?;
+        tracing::info!("в {} найдено подходящих файлов: {}", dir.display(), found.len());
+        all.extend(found);
+    }
+
+    all.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    all.dedup_by(|a, b| a.1 == b.1);
+
+    if all.len() < PACKAGE_SIZE {
         bail!(
-            "каталог реестров не найден: {} (целевая дата {})",
-            dir.display(),
-            target
+            "для пакета нужно {PACKAGE_SIZE} файла(ов) с датой раньше {today}, найдено {}",
+            all.len()
         );
     }
 
-    tracing::info!(
-        "поиск реестра в {} (целевая дата {}, сегодня {})",
-        dir.display(),
-        target,
-        today
-    );
+    let package: Vec<PathBuf> = all
+        .into_iter()
+        .take(PACKAGE_SIZE)
+        .map(|(date, path)| {
+            tracing::info!("в пакет: {} ({})", path.display(), date);
+            path
+        })
+        .collect();
 
-    let path = pick_latest_before_today(&dir, today)?;
-    tracing::info!("выбран файл {}", path.display());
-    Ok(path)
+    Ok(package)
 }
 
 /// Поиск файла по имени для `--file`.
@@ -238,6 +293,26 @@ mod tests {
     }
 
     #[test]
+    fn month_folders_span_two_months_at_month_start() {
+        let base = PathBuf::from(r"\\share\Реестры");
+        let today = NaiveDate::from_ymd_opt(2026, 8, 2).unwrap();
+        let dirs = month_folders_for_package(&base, today);
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs[0].ends_with(Path::new("2026").join("Август 26")));
+        assert!(dirs[1].ends_with(Path::new("2026").join("Июль 26")));
+    }
+
+    #[test]
+    fn month_folders_span_year_boundary() {
+        let base = PathBuf::from(r"\\share\Реестры");
+        let today = NaiveDate::from_ymd_opt(2026, 1, 3).unwrap();
+        let dirs = month_folders_for_package(&base, today);
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs[0].ends_with(Path::new("2026").join("Январь 26")));
+        assert!(dirs[1].ends_with(Path::new("2025").join("Декабрь 25")));
+    }
+
+    #[test]
     fn pick_latest_before_today_from_tmp_dir() {
         let dir = tempfile_dir();
         fs::write(dir.join("Реестр 20.07..xls"), b"a").unwrap();
@@ -253,6 +328,42 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_package_across_two_month_dirs() {
+        let root = tempfile_dir();
+        let july = root.join("2026").join("Июль 26");
+        let august = root.join("2026").join("Август 26");
+        fs::create_dir_all(&july).unwrap();
+        fs::create_dir_all(&august).unwrap();
+
+        // 2 августа: вчера = 1 августа → нужны 4 файла; часть в августе, часть в июле.
+        fs::write(august.join("Реестр 01.08..xls"), b"aug1").unwrap();
+        fs::write(july.join("Реестр 31.07..xls"), b"jul31").unwrap();
+        fs::write(july.join("Реестр 30.07..xls"), b"jul30").unwrap();
+        fs::write(july.join("Реестр 29.07..xls"), b"jul29").unwrap();
+        fs::write(july.join("Реестр 28.07..xls"), b"jul28").unwrap();
+
+        let today = NaiveDate::from_ymd_opt(2026, 8, 2).unwrap();
+        let package = discover_latest_package(root.to_str().unwrap(), today).unwrap();
+        assert_eq!(package.len(), PACKAGE_SIZE);
+
+        let names: Vec<_> = package
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Реестр 01.08..xls",
+                "Реестр 31.07..xls",
+                "Реестр 30.07..xls",
+                "Реестр 29.07..xls",
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     fn tempfile_dir() -> PathBuf {

@@ -15,14 +15,23 @@ pub fn today_in_tz(tz_name: &str) -> Result<NaiveDate> {
     Ok(Utc::now().with_timezone(&tz).date_naive())
 }
 
-/// Один прогон: автопоиск или файл по имени.
+/// Один прогон: пакет из 4 реестров или один файл по `--file`.
 pub async fn run_job(cfg: &Config, file: Option<&str>) -> Result<()> {
     let today = today_in_tz(&cfg.schedule.timezone)?;
-    let source = match file {
-        Some(name) => discover::resolve_by_filename(&cfg.source.base_unc, name, today)?,
-        None => discover::discover_latest(&cfg.source.base_unc, today)?,
-    };
-    transfer::copy_and_upload(cfg, &source).await
+    match file {
+        Some(name) => {
+            let source = discover::resolve_by_filename(&cfg.source.base_unc, name, today)?;
+            transfer::copy_and_upload(cfg, &source).await
+        }
+        None => {
+            let package = discover::discover_latest_package(&cfg.source.base_unc, today)?;
+            tracing::info!(
+                "к загрузке пакет из {} файл(ов)",
+                package.len()
+            );
+            transfer::copy_and_upload_many(cfg, &package).await
+        }
+    }
 }
 
 /// Долгоживущий демон: каждый день в hour:minute по таймзоне из конфига.

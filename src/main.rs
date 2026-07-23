@@ -13,14 +13,14 @@ use crate::config::Config;
 #[derive(Debug, Parser)]
 #[command(
     name = "okpo",
-    about = "Ежедневная/ручная выгрузка реестров с UNC-шары на Ubuntu по SFTP"
+    about = "Ежедневная/ручная выгрузка реестров с UNC-шары на Ubuntu по SFTP (автопакет — 4 файла)"
 )]
 struct Cli {
-    /// Один прогон с автопоиском реестра (без ожидания расписания)
+    /// Один прогон с автопоиском пакета из 4 реестров (без ожидания расписания)
     #[arg(long, conflicts_with = "file")]
     once: bool,
 
-    /// Ручная загрузка файла по имени (например: "Реестр 22.07..xls")
+    /// Ручная загрузка одного файла по имени (например: "Реестр 22.07..xls")
     #[arg(long, value_name = "NAME")]
     file: Option<String>,
 }
@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
     }
 
     if cli.once {
-        tracing::info!("разовый автопоиск и загрузка");
+        tracing::info!("разовый автопоиск пакета (4 файла) и загрузка");
         schedule::run_job(&cfg, None).await?;
         return Ok(());
     }
