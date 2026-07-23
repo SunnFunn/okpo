@@ -1,0 +1,14 @@
+[source]
+base_unc = "\\\\mskfs.rusagrotrans.ru\\Groups\\Департамент транспортно-экспедиционного обслуживания\\ДТЭО new\\Реестры"
+
+[schedule]
+timezone = "Europe/Moscow"
+hour = 7
+minute = 0
+
+[ssh]
+host = "10.101.139.4"
+port = 22
+user = "atretyakov"
+private_key = "C:\\Users\\tretyakov_av\\.ssh\\id_rsa"
+remote_dir = "/home/atretyakov/okpo-agent/data/registers"
