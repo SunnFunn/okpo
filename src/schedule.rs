@@ -7,6 +7,7 @@ use chrono_tz::Tz;
 
 use crate::config::{Config, ScheduleConfig};
 use crate::discover;
+use crate::logging::LogFile;
 use crate::transfer;
 
 /// Сегодняшняя дата в таймзоне из конфига.
@@ -35,7 +36,7 @@ pub async fn run_job(cfg: &Config, file: Option<&str>) -> Result<()> {
 }
 
 /// Долгоживущий демон: каждый день в hour:minute по таймзоне из конфига.
-pub async fn run_daemon(cfg: Config) -> Result<()> {
+pub async fn run_daemon(cfg: Config, log_file: LogFile) -> Result<()> {
     let tz = Tz::from_str(&cfg.schedule.timezone)
         .with_context(|| format!("неизвестная таймзона {}", cfg.schedule.timezone))?;
 
@@ -54,6 +55,16 @@ pub async fn run_daemon(cfg: Config) -> Result<()> {
             sleep_for.as_secs_f64() / 3600.0
         );
         tokio::time::sleep(sleep_for).await;
+
+        // Каждый суточный прогон перезаписывает лог-файл.
+        if let Err(err) = log_file.reset() {
+            tracing::error!("не удалось обнулить лог-файл: {err:#}");
+        } else {
+            tracing::info!(
+                "=== новый запуск okpo, лог: {} ===",
+                log_file.path().display()
+            );
+        }
 
         tracing::info!("старт ежедневной выгрузки");
         if let Err(err) = run_job(&cfg, None).await {
