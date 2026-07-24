@@ -9,6 +9,9 @@ pub struct Config {
     pub source: SourceConfig,
     pub schedule: ScheduleConfig,
     pub ssh: SshConfig,
+    /// После SFTP: reverse SOCKS + запуск okpo-agent на Ubuntu (опционально).
+    #[serde(default)]
+    pub agent: AgentConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -32,6 +35,61 @@ pub struct SshConfig {
     pub remote_dir: String,
 }
 
+/// Запуск `okpo-agent` на prod в той же логической цепочке, что и выгрузка реестров.
+///
+/// Реализуется через OpenSSH CLI: `ssh -R <port> … remote_command`
+/// (remote dynamic SOCKS; трафик DaData/Yandex идёт через эту Windows-машину).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentConfig {
+    /// Если false — только SFTP, без запуска бинаря на Ubuntu.
+    #[serde(default = "default_agent_enabled")]
+    pub enabled: bool,
+    /// Порт reverse SOCKS на Ubuntu (`ssh -R <port>`).
+    #[serde(default = "default_socks_port")]
+    pub remote_socks_port: u16,
+    /// Каталог okpo-agent на Ubuntu (туда `cd` перед командой).
+    #[serde(default = "default_workdir")]
+    pub working_directory: String,
+    /// Команда на Ubuntu (после `cd working_directory`).
+    #[serde(default = "default_remote_command")]
+    pub remote_command: String,
+    /// Имя OpenSSH-клиента в PATH (`ssh` / `ssh.exe`).
+    #[serde(default = "default_ssh_binary")]
+    pub ssh_binary: String,
+}
+
+fn default_agent_enabled() -> bool {
+    true
+}
+
+fn default_socks_port() -> u16 {
+    3128
+}
+
+fn default_workdir() -> String {
+    String::from("/home/atretyakov/okpo-agent")
+}
+
+fn default_remote_command() -> String {
+    String::from("OKPO_SKIP_BUILD=1 ./run.sh prod register --dadata-parse")
+}
+
+fn default_ssh_binary() -> String {
+    String::from("ssh")
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_agent_enabled(),
+            remote_socks_port: default_socks_port(),
+            working_directory: default_workdir(),
+            remote_command: default_remote_command(),
+            ssh_binary: default_ssh_binary(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -52,6 +110,7 @@ impl Default for Config {
                 private_key: String::from(r"C:\Users\tretyakov_av\.ssh\id_rsa"),
                 remote_dir: String::from("/home/atretyakov/okpo-agent/data/registers"),
             },
+            agent: AgentConfig::default(),
         }
     }
 }
@@ -95,6 +154,17 @@ impl Config {
         }
         if self.ssh.remote_dir.trim().is_empty() {
             bail!("ssh.remote_dir не должен быть пустым");
+        }
+        if self.agent.enabled {
+            if self.agent.remote_socks_port == 0 {
+                bail!("agent.remote_socks_port должен быть > 0");
+            }
+            if self.agent.working_directory.trim().is_empty() {
+                bail!("agent.working_directory не должен быть пустым");
+            }
+            if self.agent.remote_command.trim().is_empty() {
+                bail!("agent.remote_command не должен быть пустым");
+            }
         }
         Ok(())
     }

@@ -1,3 +1,4 @@
+mod agent;
 mod config;
 mod discover;
 mod logging;
@@ -14,7 +15,7 @@ use crate::logging::LogFile;
 #[derive(Debug, Parser)]
 #[command(
     name = "okpo",
-    about = "Ежедневная/ручная выгрузка реестров с UNC-шары на Ubuntu по SFTP (автопакет — 4 файла)"
+    about = "Ежедневная/ручная выгрузка реестров с UNC-шары на Ubuntu по SFTP + запуск okpo-agent (SSH -R SOCKS)"
 )]
 struct Cli {
     /// Один прогон с автопоиском пакета из 4 реестров (без ожидания расписания)
@@ -24,6 +25,10 @@ struct Cli {
     /// Ручная загрузка одного файла по имени (например: "Реестр 22.07..xls")
     #[arg(long, value_name = "NAME")]
     file: Option<String>,
+
+    /// Только SFTP, без `ssh -R` и без запуска okpo-agent на Ubuntu
+    #[arg(long)]
+    skip_agent: bool,
 }
 
 #[tokio::main]
@@ -37,17 +42,17 @@ async fn main() -> Result<()> {
 
         if let Some(name) = cli.file.as_deref() {
             tracing::info!("ручная загрузка файла: {name}");
-            schedule::run_job(&cfg, Some(name)).await?;
+            schedule::run_job(&cfg, Some(name), cli.skip_agent).await?;
             return Ok(());
         }
 
         tracing::info!("разовый автопоиск пакета (4 файла) и загрузка");
-        schedule::run_job(&cfg, None).await?;
+        schedule::run_job(&cfg, None, cli.skip_agent).await?;
         return Ok(());
     }
 
     let cfg = Config::load()?;
-    schedule::run_daemon(cfg, log_file).await
+    schedule::run_daemon(cfg, log_file, cli.skip_agent).await
 }
 
 /// Обнуляет лог-файл перед прогоном, чтобы остались только записи текущего запуска.

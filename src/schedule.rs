@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 
+use crate::agent;
 use crate::config::{Config, ScheduleConfig};
 use crate::discover;
 use crate::logging::LogFile;
@@ -16,13 +17,13 @@ pub fn today_in_tz(tz_name: &str) -> Result<NaiveDate> {
     Ok(Utc::now().with_timezone(&tz).date_naive())
 }
 
-/// Один прогон: пакет из 4 реестров или один файл по `--file`.
-pub async fn run_job(cfg: &Config, file: Option<&str>) -> Result<()> {
+/// Один прогон: пакет из 4 реестров или один файл по `--file`, затем (опционально) okpo-agent.
+pub async fn run_job(cfg: &Config, file: Option<&str>, skip_agent: bool) -> Result<()> {
     let today = today_in_tz(&cfg.schedule.timezone)?;
     match file {
         Some(name) => {
             let source = discover::resolve_by_filename(&cfg.source.base_unc, name, today)?;
-            transfer::copy_and_upload(cfg, &source).await
+            transfer::copy_and_upload(cfg, &source).await?;
         }
         None => {
             let package = discover::discover_latest_package(&cfg.source.base_unc, today)?;
@@ -30,13 +31,20 @@ pub async fn run_job(cfg: &Config, file: Option<&str>) -> Result<()> {
                 "к загрузке пакет из {} файл(ов)",
                 package.len()
             );
-            transfer::copy_and_upload_many(cfg, &package).await
+            transfer::copy_and_upload_many(cfg, &package).await?;
         }
     }
+
+    if skip_agent {
+        tracing::info!("--skip-agent: запуск okpo-agent на Ubuntu пропущен");
+        return Ok(());
+    }
+
+    agent::run_register_with_reverse_socks(&cfg.ssh, &cfg.agent).await
 }
 
 /// Долгоживущий демон: каждый день в hour:minute по таймзоне из конфига.
-pub async fn run_daemon(cfg: Config, log_file: LogFile) -> Result<()> {
+pub async fn run_daemon(cfg: Config, log_file: LogFile, skip_agent: bool) -> Result<()> {
     let tz = Tz::from_str(&cfg.schedule.timezone)
         .with_context(|| format!("неизвестная таймзона {}", cfg.schedule.timezone))?;
 
@@ -67,7 +75,7 @@ pub async fn run_daemon(cfg: Config, log_file: LogFile) -> Result<()> {
         }
 
         tracing::info!("старт ежедневной выгрузки");
-        if let Err(err) = run_job(&cfg, None).await {
+        if let Err(err) = run_job(&cfg, None, skip_agent).await {
             tracing::error!("ошибка ежедневной выгрузки: {err:#}");
         } else {
             tracing::info!("ежедневная выгрузка завершена успешно");
