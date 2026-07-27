@@ -17,21 +17,40 @@ pub fn today_in_tz(tz_name: &str) -> Result<NaiveDate> {
     Ok(Utc::now().with_timezone(&tz).date_naive())
 }
 
-/// Один прогон: пакет из 4 реестров или один файл по `--file`, затем (опционально) okpo-agent.
-pub async fn run_job(cfg: &Config, file: Option<&str>, skip_agent: bool) -> Result<()> {
-    let today = today_in_tz(&cfg.schedule.timezone)?;
-    match file {
-        Some(name) => {
-            let source = discover::resolve_by_filename(&cfg.source.base_unc, name, today)?;
-            transfer::copy_and_upload(cfg, &source).await?;
+/// Один прогон: опционально SFTP, затем (опционально) okpo-agent.
+///
+/// - `skip_register_sync = false` (дефолт): без отбора/SFTP — agent на Ubuntu сам
+///   синхронизирует с mount `/data/registers`.
+/// - `skip_register_sync = true`: старый путь (UNC → SFTP); remote-команде
+///   дописывается `--skip-register-sync`.
+pub async fn run_job(
+    cfg: &Config,
+    file: Option<&str>,
+    skip_agent: bool,
+    skip_register_sync: bool,
+) -> Result<()> {
+    if skip_register_sync {
+        let today = today_in_tz(&cfg.schedule.timezone)?;
+        match file {
+            Some(name) => {
+                let source = discover::resolve_by_filename(&cfg.source.base_unc, name, today)?;
+                transfer::copy_and_upload(cfg, &source).await?;
+            }
+            None => {
+                let package = discover::discover_latest_package(&cfg.source.base_unc, today)?;
+                tracing::info!(
+                    "к загрузке пакет из {} файл(ов)",
+                    package.len()
+                );
+                transfer::copy_and_upload_many(cfg, &package).await?;
+            }
         }
-        None => {
-            let package = discover::discover_latest_package(&cfg.source.base_unc, today)?;
-            tracing::info!(
-                "к загрузке пакет из {} файл(ов)",
-                package.len()
-            );
-            transfer::copy_and_upload_many(cfg, &package).await?;
+    } else {
+        tracing::info!(
+            "SFTP пропущен (дефолт): okpo-agent заберёт файлы с mount на Ubuntu"
+        );
+        if file.is_some() {
+            anyhow::bail!("внутренняя ошибка: --file должен включать SFTP");
         }
     }
 
@@ -40,19 +59,25 @@ pub async fn run_job(cfg: &Config, file: Option<&str>, skip_agent: bool) -> Resu
         return Ok(());
     }
 
-    agent::run_register_with_reverse_socks(&cfg.ssh, &cfg.agent).await
+    agent::run_register_with_reverse_socks(&cfg.ssh, &cfg.agent, skip_register_sync).await
 }
 
 /// Долгоживущий демон: каждый день в hour:minute по таймзоне из конфига.
-pub async fn run_daemon(cfg: Config, log_file: LogFile, skip_agent: bool) -> Result<()> {
+pub async fn run_daemon(
+    cfg: Config,
+    log_file: LogFile,
+    skip_agent: bool,
+    skip_register_sync: bool,
+) -> Result<()> {
     let tz = Tz::from_str(&cfg.schedule.timezone)
         .with_context(|| format!("неизвестная таймзона {}", cfg.schedule.timezone))?;
 
     tracing::info!(
-        "демон запущен: ежедневно в {:02}:{:02} ({})",
+        "демон запущен: ежедневно в {:02}:{:02} ({}); skip_register_sync={}",
         cfg.schedule.hour,
         cfg.schedule.minute,
-        cfg.schedule.timezone
+        cfg.schedule.timezone,
+        skip_register_sync
     );
 
     loop {
@@ -74,11 +99,11 @@ pub async fn run_daemon(cfg: Config, log_file: LogFile, skip_agent: bool) -> Res
             );
         }
 
-        tracing::info!("старт ежедневной выгрузки");
-        if let Err(err) = run_job(&cfg, None, skip_agent).await {
-            tracing::error!("ошибка ежедневной выгрузки: {err:#}");
+        tracing::info!("старт ежедневного прогона");
+        if let Err(err) = run_job(&cfg, None, skip_agent, skip_register_sync).await {
+            tracing::error!("ошибка ежедневного прогона: {err:#}");
         } else {
-            tracing::info!("ежедневная выгрузка завершена успешно");
+            tracing::info!("ежедневный прогон завершён успешно");
         }
 
         // Небольшая пауза, чтобы не зациклиться в ту же минуту.

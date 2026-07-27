@@ -1,24 +1,28 @@
 # okpo
 
-Ежедневная и ручная выгрузка реестров вагонов с корпоративной UNC-шары (Windows) на Ubuntu по SFTP, затем запуск `okpo-agent` на prod с reverse SOCKS (`ssh -R 3128`).
+Ежедневный запуск `okpo-agent` на Ubuntu с reverse SOCKS (`ssh -R 3128`). По умолчанию файлы реестров на prod уже доступны с mount `/data/registers` — **SFTP не делается**. Запасной режим `--skip-register-sync` — старая выгрузка с UNC по SFTP.
 
 ## Назначение
 
-1. Находит пакет из **четырёх** самых свежих реестров в каталоге `Реестры` на файловом сервере.
-2. Копирует их во временную папку `tmp/` в корне проекта **с исходными именами**.
-3. Передаёт пакет на Ubuntu по SSH/SFTP в `remote_dir` **с теми же именами** (один SFTP-сеанс, библиотека russh).
-4. Удаляет локальные копии из `tmp/` после успешной загрузки.
-5. Открывает вторую сессию **OpenSSH CLI**: `ssh -R 3128 …` и в ней запускает `okpo-agent` (DaData/Yandex через SOCKS на prod `127.0.0.1:3128`, трафик через эту Windows-машину). Сессия живёт, пока идёт register, затем закрывается.
+**Дефолт (рекомендуется, mount на prod):**
+1. Открывает OpenSSH-сессию: `ssh -R 3128 …` и запускает `okpo-agent` (без `--skip-register-sync`).
+2. На Ubuntu agent сам копирует пакет из mount `/data/registers` в свой `data/registers/`.
 
-По умолчанию агент работает как демон и каждый день в **04:00 Europe/Moscow** выполняет автопоиск, загрузку и запуск register (см. `config.toml`).
+**Запасной режим `--skip-register-sync` (mount недоступен):**
+1. Находит пакет из **четырёх** самых свежих реестров на UNC-шаре.
+2. Копирует их в `tmp/`, затем по SFTP в `remote_dir` на Ubuntu.
+3. Запускает `okpo-agent` по SSH с дописанным `--skip-register-sync` (брать уже залитые файлы, не mount).
+
+По умолчанию процесс может работать как демон и каждый день в **04:00 Europe/Moscow** запускать register (см. `config.toml`).
 
 ## Требования
 
-- Windows-машина с доступом к UNC-шаре и **выходом в интернет** (через неё идёт SOCKS для DaData)
+- Windows-машина с **выходом в интернет** (через неё идёт SOCKS для DaData)
+- Для запасного режима / `--file`: доступ к UNC-шаре (`source.base_unc`)
 - Rust toolchain (`cargo`, `rustc`)
 - OpenSSH-клиент в PATH (`ssh` / `ssh.exe`) — для шага `-R` + remote command
 - SSH private key с доступом к Ubuntu-хосту
-- На Ubuntu включён SFTP; для `-R` в `sshd_config` обычно нужно `GatewayPorts`/`AllowTcpForwarding` (по умолчанию localhost-bind ок)
+- На Ubuntu: для дефолта — рабочий mount `/data/registers`; для запасного — SFTP в `remote_dir`
 - На Ubuntu в env okpo-agent: `OKPO_HTTP_PROXY=socks5h://127.0.0.1:3128` (или аналог)
 
 ## Конфигурация
@@ -57,13 +61,98 @@ ssh_binary = "ssh"
 | `ssh` | `host` / `port` / `user` | Параметры SSH |
 | `ssh` | `private_key` | Путь к приватному ключу |
 | `ssh` | `remote_dir` | Каталог на Ubuntu для реестров |
-| `agent` | `enabled` | После SFTP запускать okpo-agent с `-R` |
+| `agent` | `enabled` | Запускать okpo-agent по SSH с `-R` |
 | `agent` | `remote_socks_port` | Порт remote dynamic SOCKS (`ssh -R <port>`) |
 | `agent` | `working_directory` | `cd` на Ubuntu перед командой |
-| `agent` | `remote_command` | Команда register на Ubuntu |
+| `agent` | `remote_command` | Базовая команда register на Ubuntu (`--skip-register-sync` дописывается только в запасном режиме) |
 | `agent` | `ssh_binary` | OpenSSH-клиент (`ssh` / `ssh.exe`) |
 
-## Логика выбора файлов (автопоиск пакета)
+## Два режима запуска
+
+| | **Дефолт** (mount на prod) | **Запасной** `--skip-register-sync` |
+|--|----------------------------|-------------------------------------|
+| Когда | Mount `/data/registers` на Ubuntu работает | Mount недоступен / битый |
+| На Windows | Только `ssh -R` + remote register | Отбор 4 файлов с UNC → SFTP → `ssh -R` |
+| На Ubuntu (agent) | Сам sync с mount (флаг **не** передаётся) | Получает `--skip-register-sync`, берёт уже залитые в `data/registers` |
+| UNC-шара с Windows | Не нужна | Нужна |
+
+### Режим 1 — дефолт (рекомендуется)
+
+Сборка (один раз / после правок):
+
+```bat
+cargo build --release
+```
+
+Разовый прогон:
+
+```bat
+cd C:\Users\tretyakov_av\Apps\okpo
+.\target\release\okpo.exe --once
+```
+
+Демон (каждый день по `schedule` в `config.toml`):
+
+```bat
+.\target\release\okpo.exe
+```
+
+Что происходит:
+1. SFTP **не** выполняется.
+2. `ssh -R 3128` на prod + команда из `config.toml`, например:
+   `OKPO_SKIP_BUILD=1 ./run.sh prod register --dadata-parse`
+3. На Ubuntu `okpo-agent` копирует пакет из `/data/registers` (mount) в свой `data/registers/`, дальше обычный register.
+
+Планировщик заданий Windows: программа = `okpo.exe`, аргументы = `--once`, рабочая папка = корень проекта (см. [WINDOWS_TASK_SCHEDULER.md](WINDOWS_TASK_SCHEDULER.md)).
+
+### Режим 2 — запасной (`--skip-register-sync`)
+
+Нужен доступ Windows к UNC (`source.base_unc`) и рабочий SFTP на Ubuntu.
+
+```bat
+cd C:\Users\tretyakov_av\Apps\okpo
+.\target\release\okpo.exe --once --skip-register-sync
+```
+
+Только выгрузка файлов, без register на Ubuntu:
+
+```bat
+.\target\release\okpo.exe --once --skip-register-sync --skip-agent
+```
+
+Один файл по имени:
+
+```bat
+.\target\release\okpo.exe --file "Реестр 22.07..xls"
+```
+
+(`--file` всегда идёт по SFTP и сам дописывает `--skip-register-sync` remote-команде.)
+
+Что происходит:
+1. Поиск 4 свежих `Реестр DD.MM..xls` на UNC (логика ниже).
+2. Копирование в `tmp/` → SFTP в `ssh.remote_dir`.
+3. `ssh -R 3128` + та же `remote_command`, **плюс** `--skip-register-sync`, например:
+   `OKPO_SKIP_BUILD=1 ./run.sh prod register --dadata-parse --skip-register-sync`
+
+Планировщик при недоступном mount: аргументы = `--once --skip-register-sync`.
+
+### Краткая шпаргалка команд
+
+```bat
+:: дефолт
+.\target\release\okpo.exe --once
+
+:: запасной SFTP
+.\target\release\okpo.exe --once --skip-register-sync
+
+:: только SFTP, без agent
+.\target\release\okpo.exe --once --skip-register-sync --skip-agent
+
+:: один файл (SFTP + agent --skip-register-sync)
+.\target\release\okpo.exe --file "Реестр 22.07..xls"
+```
+
+## Логика выбора файлов (только режим `--skip-register-sync` / `--file`)
 
 Время считается в таймзоне из `config.toml` (по умолчанию Москва).
 
@@ -74,13 +163,13 @@ ssh_binary = "ssh"
 3. Среди файлов вида `Реестр DD.MM..xls` / `Реестр DD.MM.xls` выбираются **4 самых поздних** по дате.
 4. Если найдено меньше 4 файлов — ошибка (прогон завершается с ненулевым кодом).
 
-Имена на Ubuntu совпадают с исходными именами файлов. Режим `--file` по-прежнему загружает **один** указанный файл.
+Имена на Ubuntu совпадают с исходными именами файлов.
 
-## Поведение при существующем файле на Ubuntu
+## Поведение при существующем файле на Ubuntu (SFTP)
 
 Перед записью проверяется наличие remote-файла. Если он уже есть — в лог пишется предупреждение, файл **перезаписывается**. Это не считается ошибкой.
 
-## Команды
+## Сборка и прочие команды
 
 ```bat
 :: проверка и сборка
@@ -92,22 +181,9 @@ cargo test
 :: справка по флагам
 cargo run -- --help
 
-:: демон: ежедневно по schedule из config.toml (SFTP + agent)
+:: демон (дефолт: только ssh -R + agent)
 cargo run --release
 .\target\release\okpo.exe
-
-:: разовый автопоиск пакета (4 файла), SFTP, затем ssh -R + register
-cargo run -- --once
-cargo run --release -- --once
-.\target\release\okpo.exe --once
-
-:: только выгрузка файлов, без запуска okpo-agent
-.\target\release\okpo.exe --once --skip-agent
-
-:: ручная загрузка одного файла (+ agent, если enabled)
-cargo run -- --file "Реестр 22.07..xls"
-cargo run --release -- --file "Реестр 22.07..xls"
-.\target\release\okpo.exe --file "Реестр 22.07..xls"
 ```
 
 Уровень логов можно задать через `RUST_LOG` (по умолчанию `info`):
@@ -120,23 +196,26 @@ cargo run -- --once
 Логи каждого запуска пишутся в `okpo-task.log` в корне проекта (рядом с `config.toml`).
 Файл **перезаписывается** при каждом прогоне — хранится только последний запуск.
 
-## Режимы CLI
+## Режимы CLI (сводка)
 
 | Режим | Команда | Поведение |
 |-------|---------|-----------|
-| Демон | `okpo` | Ждёт расписания, каждый день пакет + SFTP + agent |
-| Разовый авто | `okpo --once` | Один прогон: пакет из 4 реестров + SFTP + agent |
-| Ручная загрузка | `okpo --file "…"` | Один файл + SFTP + agent |
-| Без agent | `… --skip-agent` | Только SFTP (удобно для отладки выгрузки) |
+| Демон (дефолт) | `okpo` | Расписание → только `ssh -R` + agent (mount на Ubuntu) |
+| Разовый (дефолт) | `okpo --once` | Только `ssh -R` + agent |
+| Запасной SFTP | `… --skip-register-sync` | UNC → SFTP, agent с `--skip-register-sync` |
+| Ручная загрузка | `okpo --file "…"` | Один файл по SFTP + agent с `--skip-register-sync` |
+| Без agent | `… --skip-agent` | Не запускать remote register |
 
 Флаг `--file` одноразовый: после прогона процесс завершается. Не комбинируется с `--once`.
 
-### Почему два SSH-канала
+### Почему два SSH-канала (в режиме `--skip-register-sync`)
 
 | Шаг | Как | Зачем |
 |-----|-----|-------|
-| SFTP | russh в процессе `okpo` | Надёжная выгрузка файлов |
-| `-R` + register | системный `ssh` | Remote dynamic SOCKS (`-R 3128`) как у ручного `ssh -R 3128`; russh так не умеет |
+| SFTP | russh в процессе `okpo` | Выгрузка файлов, если mount недоступен |
+| `-R` + register | системный `ssh` | Remote dynamic SOCKS (`-R 3128`); russh так не умеет |
+
+В **дефолтном** режиме остаётся только шаг `-R` + register.
 
 Пока идёт `remote_command`, туннель жив; после exit register сессия закрывается — systemd-таймер на prod без живого `-R` для DaData не подходит.
 
@@ -145,4 +224,4 @@ cargo run -- --once
 - Для срабатывания встроенного таймера процесс должен быть **запущен и не завершён** (сессия пользователя / служба / автозагрузка).
 - Альтернатива: Windows Task Scheduler с ежедневным запуском `okpo.exe --once` (см. [WINDOWS_TASK_SCHEDULER.md](WINDOWS_TASK_SCHEDULER.md)). Учтите: register может идти долго — увеличьте лимит времени задачи.
 - ПК должен быть **онлайн** на время register (SOCKS через Windows).
-- Временные файлы лежат в `tmp/` в корне проекта и удаляются после **успешной** загрузки на Ubuntu.
+- Временные файлы (`tmp/`) появляются только в режиме SFTP и удаляются после **успешной** загрузки на Ubuntu.
