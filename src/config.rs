@@ -100,7 +100,7 @@ impl Default for Config {
             },
             schedule: ScheduleConfig {
                 timezone: String::from("Europe/Moscow"),
-                hour: 7,
+                hour: 4,
                 minute: 0,
             },
             ssh: SshConfig {
