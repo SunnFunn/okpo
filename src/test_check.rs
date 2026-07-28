@@ -166,7 +166,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
     let export_rows = load_export_json(&local_json)?;
     let report_rows = build_report_rows(&assignments, &export_rows);
 
-    tracing::info!("шаг 4/4: запись Excel-отчёта");
+    tracing::info!("шаг 4/4: запись Excel-отчёта (группировка по маршруту)");
     let report_dir = if Path::new(&cfg.test_check.report_dir).is_absolute() {
         Path::new(&cfg.test_check.report_dir).to_path_buf()
     } else {
@@ -175,10 +175,14 @@ pub async fn run(cfg: &Config) -> Result<()> {
     let out_path = report::report_path(&report_dir, export_date);
     report::write_report(&out_path, &report_rows)?;
 
+    let groups = report::aggregate_rows(&report_rows);
+    let total_cars: u32 = groups.iter().map(|g| g.car_count).sum();
     tracing::info!(
         json = %local_json.display(),
         report = %out_path.display(),
-        wagons = report_rows.len(),
+        unique_wagons = report_rows.len(),
+        groups = groups.len(),
+        cars_in_report = total_cars,
         "--test-check завершён успешно"
     );
     Ok(())

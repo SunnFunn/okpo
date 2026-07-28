@@ -54,6 +54,7 @@ FROM (
         JOIN NSI.RailWay RF (NOLOCK) ON RF.RailWayId = SF.RailWayId
     WHERE RDC.DateLink >= ?
         AND RDC.OperationType = 'PP'
+        AND RDC.SenderId = 1019146
         AND RDC.StationToId != DP.StationToId
         AND DP.StationToId = RDC.StationFromId
 ) R1
@@ -96,6 +97,7 @@ FROM (
             AND ST.ST_CODE6 != DP.StationToCode
             AND SF.ST_CODE6 = DP.StationToCode
             AND IND.TranspPurposeID = 1
+            AND DP.BelongType IN (N'Собственный', N'Арендованный', N'В лизинге')
     ) c
 ) CLEARED
 WHERE CLEARED.Cars = 1

@@ -166,7 +166,7 @@ cd C:\Users\tretyakov_av\Apps\okpo
 1. По SFTP скачивает самый свежий `register_export_YYYY-MM-DD.json` из `test_check.remote_exports_dir` на Ubuntu в локальный `tmp/`.
 2. Запускает `test/assignments.py` (два SQL: реестр назначений + накладные) через Python/`pyodbc`.
 3. Дедуплицирует номера вагонов: приоритет `registers` → `invoices` → JSON-экспорт.
-4. Пишет Excel `tmp/test_check_YYYY-MM-DD.xlsx` (станции/коды/дороги из источника строки).
+4. Пишет Excel `tmp/test_check_YYYY-MM-DD.xlsx`: строки сгруппированы по станциям/дорогам/источнику, последняя колонка — **Количество вагонов**.
 
 **Требования:** `pyodbc` + ODBC Driver 18 for SQL Server; Windows под доменным пользователем с доступом к `MSKASUVPL` / `ASUVP_RAT`. Режим **не** запускает okpo-agent и **не** заливает реестры на прод.
 

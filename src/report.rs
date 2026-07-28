@@ -1,5 +1,6 @@
 //! Excel-отчёт для режима `--test-check`.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,7 +9,6 @@ use chrono::NaiveDate;
 use rust_xlsxwriter::{Format, Workbook, Worksheet};
 
 const HEADERS: [&str; 8] = [
-    "Номер вагона",
     "Станция отправления",
     "Код станции отправления",
     "Дорога отправления",
@@ -16,11 +16,12 @@ const HEADERS: [&str; 8] = [
     "Код станции назначения",
     "Дорога назначения",
     "Источник",
+    "Количество вагонов",
 ];
 
-const COL_WIDTHS: [f64; 8] = [14.0, 28.0, 18.0, 14.0, 28.0, 18.0, 14.0, 16.0];
+const COL_WIDTHS: [f64; 8] = [28.0, 18.0, 14.0, 28.0, 18.0, 14.0, 16.0, 18.0];
 
-/// Строка итогового отчёта.
+/// Строка до агрегации (один уникальный вагон).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportRow {
     pub car_number: String,
@@ -33,6 +34,61 @@ pub struct ReportRow {
     pub source: &'static str,
 }
 
+/// Строка Excel после группировки по маршруту/источнику.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregatedRow {
+    pub station_from: String,
+    pub station_from_code: String,
+    pub railway_from: String,
+    pub station_to: String,
+    pub station_to_code: String,
+    pub railway_to: String,
+    pub source: &'static str,
+    pub car_count: u32,
+}
+
+type GroupKey = (String, String, String, String, String, String, &'static str);
+
+/// Группирует уникальные вагоны: сумма по маршруту + источнику.
+pub fn aggregate_rows(rows: &[ReportRow]) -> Vec<AggregatedRow> {
+    let mut counts: HashMap<GroupKey, u32> = HashMap::new();
+    let mut order: Vec<GroupKey> = Vec::new();
+
+    for row in rows {
+        let key = (
+            row.station_from.clone(),
+            row.station_from_code.clone(),
+            row.railway_from.clone(),
+            row.station_to.clone(),
+            row.station_to_code.clone(),
+            row.railway_to.clone(),
+            row.source,
+        );
+        let entry = counts.entry(key.clone()).or_insert(0);
+        if *entry == 0 {
+            order.push(key);
+        }
+        *entry += 1;
+    }
+
+    order
+        .into_iter()
+        .map(|key| {
+            let car_count = *counts.get(&key).unwrap_or(&0);
+            AggregatedRow {
+                station_from: key.0,
+                station_from_code: key.1,
+                railway_from: key.2,
+                station_to: key.3,
+                station_to_code: key.4,
+                railway_to: key.5,
+                source: key.6,
+                car_count,
+            }
+        })
+        .collect()
+}
+
 /// Путь к отчёту: `{report_dir}/test_check_{YYYY-MM-DD}.xlsx`.
 pub fn report_path(report_dir: &Path, export_date: NaiveDate) -> PathBuf {
     report_dir.join(format!(
@@ -41,8 +97,13 @@ pub fn report_path(report_dir: &Path, export_date: NaiveDate) -> PathBuf {
     ))
 }
 
-/// Пишет Excel-отчёт со строками проверки.
+/// Пишет Excel-отчёт со сгруппированными строками.
 pub fn write_report(path: &Path, rows: &[ReportRow]) -> Result<()> {
+    let aggregated = aggregate_rows(rows);
+    write_aggregated_report(path, &aggregated)
+}
+
+fn write_aggregated_report(path: &Path, rows: &[AggregatedRow]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("не удалось создать {}", parent.display()))?;
@@ -83,17 +144,19 @@ pub fn write_report(path: &Path, rows: &[ReportRow]) -> Result<()> {
     workbook
         .save(path)
         .with_context(|| format!("не удалось сохранить {}", path.display()))?;
+
+    let total_cars: u32 = rows.iter().map(|r| r.car_count).sum();
     tracing::info!(
         path = %path.display(),
-        rows = rows.len(),
+        groups = rows.len(),
+        cars = total_cars,
         "Excel-отчёт записан"
     );
     Ok(())
 }
 
-fn write_row(ws: &mut Worksheet, row: u32, data: &ReportRow) -> Result<()> {
-    let values = [
-        data.car_number.as_str(),
+fn write_row(ws: &mut Worksheet, row: u32, data: &AggregatedRow) -> Result<()> {
+    let texts = [
         data.station_from.as_str(),
         data.station_from_code.as_str(),
         data.railway_from.as_str(),
@@ -102,9 +165,50 @@ fn write_row(ws: &mut Worksheet, row: u32, data: &ReportRow) -> Result<()> {
         data.railway_to.as_str(),
         data.source,
     ];
-    for (col, value) in values.iter().enumerate() {
+    for (col, value) in texts.iter().enumerate() {
         ws.write_string(row, col as u16, *value)
             .with_context(|| format!("ячейка row={row} col={col}"))?;
     }
+    // Количество — числом, чтобы в Excel работала сумма/фильтр.
+    ws.write_number(row, 7, data.car_count as f64)
+        .with_context(|| format!("ячейка row={row} col=7"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(car: &str, from: &str, to: &str, source: &'static str) -> ReportRow {
+        ReportRow {
+            car_number: car.into(),
+            station_from: from.into(),
+            station_from_code: "1".into(),
+            railway_from: "МСК".into(),
+            station_to: to.into(),
+            station_to_code: "2".into(),
+            railway_to: "ЮВС".into(),
+            source,
+        }
+    }
+
+    #[test]
+    fn aggregates_same_route() {
+        let rows = vec![
+            row("11111111", "A", "B", "registers"),
+            row("22222222", "A", "B", "registers"),
+            row("33333333", "A", "C", "registers"),
+            row("44444444", "A", "B", "invoices"),
+        ];
+        let agg = aggregate_rows(&rows);
+        assert_eq!(agg.len(), 3);
+        assert_eq!(agg[0].car_count, 2);
+        assert_eq!(agg[0].station_from, "A");
+        assert_eq!(agg[0].station_to, "B");
+        assert_eq!(agg[0].source, "registers");
+        assert_eq!(agg[1].car_count, 1);
+        assert_eq!(agg[1].station_to, "C");
+        assert_eq!(agg[2].source, "invoices");
+        assert_eq!(agg[2].car_count, 1);
+    }
 }
