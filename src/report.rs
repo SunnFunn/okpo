@@ -21,7 +21,7 @@ const HEADERS: [&str; 8] = [
 
 const COL_WIDTHS: [f64; 8] = [28.0, 18.0, 14.0, 28.0, 18.0, 14.0, 16.0, 18.0];
 
-/// Строка до агрегации (один уникальный вагон).
+/// Строка до агрегации (номерной вагон или пакет NoNumber).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportRow {
     pub car_number: String,
@@ -32,6 +32,8 @@ pub struct ReportRow {
     pub station_to_code: String,
     pub railway_to: String,
     pub source: &'static str,
+    /// Для номерных — обычно 1; для `NoNumber` — `CarCount` из JSON.
+    pub car_count: u32,
 }
 
 /// Строка Excel после группировки по маршруту/источнику.
@@ -49,7 +51,7 @@ pub struct AggregatedRow {
 
 type GroupKey = (String, String, String, String, String, String, &'static str);
 
-/// Группирует уникальные вагоны: сумма по маршруту + источнику.
+/// Группирует строки: сумма `car_count` по маршруту + источнику.
 pub fn aggregate_rows(rows: &[ReportRow]) -> Vec<AggregatedRow> {
     let mut counts: HashMap<GroupKey, u32> = HashMap::new();
     let mut order: Vec<GroupKey> = Vec::new();
@@ -68,7 +70,7 @@ pub fn aggregate_rows(rows: &[ReportRow]) -> Vec<AggregatedRow> {
         if *entry == 0 {
             order.push(key);
         }
-        *entry += 1;
+        *entry = entry.saturating_add(row.car_count.max(1));
     }
 
     order
@@ -189,6 +191,7 @@ mod tests {
             station_to_code: "2".into(),
             railway_to: "ЮВС".into(),
             source,
+            car_count: 1,
         }
     }
 
@@ -210,5 +213,26 @@ mod tests {
         assert_eq!(agg[1].station_to, "C");
         assert_eq!(agg[2].source, "invoices");
         assert_eq!(agg[2].car_count, 1);
+    }
+
+    #[test]
+    fn aggregates_nonumber_car_count() {
+        let rows = vec![
+            row("11111111", "A", "B", "register_export"),
+            ReportRow {
+                car_number: "NoNumber".into(),
+                station_from: "A".into(),
+                station_from_code: "1".into(),
+                railway_from: "МСК".into(),
+                station_to: "B".into(),
+                station_to_code: "2".into(),
+                railway_to: "ЮВС".into(),
+                source: "register_export",
+                car_count: 159,
+            },
+        ];
+        let agg = aggregate_rows(&rows);
+        assert_eq!(agg.len(), 1);
+        assert_eq!(agg[0].car_count, 160);
     }
 }

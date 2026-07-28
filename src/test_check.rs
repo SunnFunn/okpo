@@ -16,6 +16,9 @@ use crate::transfer;
 pub(crate) struct ExportRow {
     #[serde(rename = "CarNumber")]
     car_number: String,
+    /// Количество вагонов (для `NoNumber` — пакет без номеров).
+    #[serde(rename = "CarCount", default = "default_car_count")]
+    car_count: u32,
     #[serde(rename = "StationFromName", default)]
     station_from_name: Option<String>,
     #[serde(rename = "StationFromCode", default)]
@@ -28,6 +31,10 @@ pub(crate) struct ExportRow {
     station_to_code: Option<String>,
     #[serde(rename = "RailroadToName", default)]
     railroad_to_name: Option<String>,
+}
+
+fn default_car_count() -> u32 {
+    1
 }
 
 /// Нормализация номера вагона: только цифры.
@@ -63,12 +70,31 @@ fn from_assignment(row: &AssignmentRow, source: &'static str) -> Option<ReportRo
         station_to_code: opt_string(&row.station_to_code),
         railway_to: opt_string(&row.railway_to),
         source,
+        car_count: 1,
     })
 }
 
 fn from_export(row: &ExportRow) -> Option<ReportRow> {
     let raw = row.car_number.trim();
-    if raw.eq_ignore_ascii_case("NoNumber") || raw.eq_ignore_ascii_case("Unknown") {
+    let count = row.car_count.max(1);
+
+    // Безномерные пакеты из register_export: включаем с CarCount.
+    if raw.eq_ignore_ascii_case("NoNumber") {
+        return Some(ReportRow {
+            car_number: String::from("NoNumber"),
+            station_from: opt_string(&row.station_from_name),
+            station_from_code: opt_string(&row.station_from_code),
+            railway_from: opt_string(&row.railroad_from_name),
+            station_to: opt_string(&row.station_to_name),
+            station_to_code: opt_string(&row.station_to_code),
+            railway_to: opt_string(&row.railroad_to_name),
+            source: "register_export",
+            car_count: count,
+        });
+    }
+
+    // Unknown и прочий мусор без 8-значного номера — пропускаем.
+    if raw.eq_ignore_ascii_case("Unknown") {
         return None;
     }
     let car = normalize_car_number(raw);
@@ -84,10 +110,12 @@ fn from_export(row: &ExportRow) -> Option<ReportRow> {
         station_to_code: opt_string(&row.station_to_code),
         railway_to: opt_string(&row.railroad_to_name),
         source: "register_export",
+        car_count: count,
     })
 }
 
 /// Дедупликация: registers → invoices → register_export (первое вхождение выигрывает).
+/// Строки `NoNumber` из JSON всегда добавляются (у них нет номера для дедупа).
 pub fn build_report_rows(
     assignments: &AssignmentsOutput,
     export_rows: &[ExportRow],
@@ -96,6 +124,8 @@ pub fn build_report_rows(
     let mut out: Vec<ReportRow> = Vec::new();
     let mut dropped_dup = 0usize;
     let mut dropped_invalid = 0usize;
+    let mut nonumber_added = 0usize;
+    let mut nonumber_cars = 0u32;
 
     let reg_in = assignments.registers.len();
     for row in &assignments.registers {
@@ -121,6 +151,11 @@ pub fn build_report_rows(
     for row in export_rows {
         match from_export(row) {
             None => dropped_invalid += 1,
+            Some(row) if row.car_number.eq_ignore_ascii_case("NoNumber") => {
+                nonumber_added += 1;
+                nonumber_cars = nonumber_cars.saturating_add(row.car_count);
+                out.push(row);
+            }
             Some(row) if !seen.insert(row.car_number.clone()) => dropped_dup += 1,
             Some(row) => out.push(row),
         }
@@ -133,9 +168,11 @@ pub fn build_report_rows(
         invoices_added = after_inv.saturating_sub(after_reg),
         export_in = exp_in,
         export_added = out.len().saturating_sub(after_inv),
+        nonumber_rows = nonumber_added,
+        nonumber_cars,
         dropped_duplicates = dropped_dup,
         dropped_invalid,
-        total = out.len(),
+        total_rows = out.len(),
         "дедупликация завершена"
     );
 
@@ -216,12 +253,26 @@ mod tests {
     fn export(car: &str) -> ExportRow {
         ExportRow {
             car_number: car.into(),
+            car_count: 1,
             station_from_name: Some("JSON_FROM".into()),
             station_from_code: Some("111111".into()),
             railroad_from_name: Some("МСК".into()),
             station_to_name: Some("JSON_TO".into()),
             station_to_code: Some("222222".into()),
             railroad_to_name: Some("ЮВС".into()),
+        }
+    }
+
+    fn export_nonumber(count: u32, from: &str, to: &str) -> ExportRow {
+        ExportRow {
+            car_number: "NoNumber".into(),
+            car_count: count,
+            station_from_name: Some(from.into()),
+            station_from_code: Some("520901".into()),
+            railroad_from_name: Some("СКВ".into()),
+            station_to_name: Some(to.into()),
+            station_to_code: Some("528301".into()),
+            railroad_to_name: Some("СКВ".into()),
         }
     }
 
@@ -243,18 +294,24 @@ mod tests {
                 "95569661", "X", "9", "МСК", "Y", "8", "ЮВС",
             )],
         };
-        let exports = vec![export("95569661"), export("95113130"), export("NoNumber")];
+        let exports = vec![
+            export("95569661"),
+            export("95113130"),
+            export_nonumber(10, "Новороссийск", "ИПАТОВО"),
+        ];
         let rows = build_report_rows(&assignments, &exports);
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].car_number, "95569661");
         assert_eq!(rows[0].source, "registers");
         assert_eq!(rows[0].station_from, "A");
         assert_eq!(rows[1].car_number, "95113130");
         assert_eq!(rows[1].source, "register_export");
+        assert_eq!(rows[2].car_number, "NoNumber");
+        assert_eq!(rows[2].car_count, 10);
     }
 
     #[test]
-    fn dedup_within_json_and_skip_unknown() {
+    fn includes_nonumber_and_skips_unknown() {
         let assignments = AssignmentsOutput {
             registers: vec![],
             invoices: vec![],
@@ -263,11 +320,17 @@ mod tests {
             export("95113130"),
             export("95113130"),
             export("Unknown"),
-            export("NoNumber"),
+            export_nonumber(159, "Новороссийск", "ИПАТОВО"),
         ];
         let rows = build_report_rows(&assignments, &exports);
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].car_number, "95113130");
+        assert_eq!(rows[1].car_number, "NoNumber");
+        assert_eq!(rows[1].car_count, 159);
+
+        let agg = report::aggregate_rows(&rows);
+        assert_eq!(agg.len(), 2);
+        assert_eq!(agg.iter().find(|r| r.station_from == "Новороссийск").unwrap().car_count, 159);
     }
 
     #[test]
