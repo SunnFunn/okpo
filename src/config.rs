@@ -12,6 +12,9 @@ pub struct Config {
     /// После SFTP: reverse SOCKS + запуск okpo-agent на Ubuntu (опционально).
     #[serde(default)]
     pub agent: AgentConfig,
+    /// Режим `--test-check`: JSON-экспорт + SQL + Excel.
+    #[serde(default)]
+    pub test_check: TestCheckConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,6 +61,32 @@ pub struct AgentConfig {
     pub ssh_binary: String,
 }
 
+/// Параметры режима `--test-check`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestCheckConfig {
+    /// Каталог JSON-экспортов на Ubuntu.
+    #[serde(default = "default_remote_exports_dir")]
+    pub remote_exports_dir: String,
+    /// Префикс имени файла: `register_export_YYYY-MM-DD.json`.
+    #[serde(default = "default_export_prefix")]
+    pub export_prefix: String,
+    /// Интерпретатор Python на Windows (`python` / `py` / полный путь).
+    #[serde(default = "default_python_binary")]
+    pub python_binary: String,
+    /// Путь к скрипту относительно корня проекта.
+    #[serde(default = "default_script_path")]
+    pub script_path: String,
+    /// Глубина выборки реестра назначений (дней).
+    #[serde(default = "default_registers_days")]
+    pub registers_days: u32,
+    /// Глубина выборки накладных (дней).
+    #[serde(default = "default_invoices_days")]
+    pub invoices_days: u32,
+    /// Каталог Excel-отчёта (относительно корня проекта).
+    #[serde(default = "default_report_dir")]
+    pub report_dir: String,
+}
+
 fn default_agent_enabled() -> bool {
     true
 }
@@ -78,6 +107,34 @@ fn default_ssh_binary() -> String {
     String::from("ssh")
 }
 
+fn default_remote_exports_dir() -> String {
+    String::from("/home/atretyakov/okpo-agent/data/exports")
+}
+
+fn default_export_prefix() -> String {
+    String::from("register_export")
+}
+
+fn default_python_binary() -> String {
+    String::from("python")
+}
+
+fn default_script_path() -> String {
+    String::from("test/assignments.py")
+}
+
+fn default_registers_days() -> u32 {
+    5
+}
+
+fn default_invoices_days() -> u32 {
+    60
+}
+
+fn default_report_dir() -> String {
+    String::from("tmp")
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -86,6 +143,20 @@ impl Default for AgentConfig {
             working_directory: default_workdir(),
             remote_command: default_remote_command(),
             ssh_binary: default_ssh_binary(),
+        }
+    }
+}
+
+impl Default for TestCheckConfig {
+    fn default() -> Self {
+        Self {
+            remote_exports_dir: default_remote_exports_dir(),
+            export_prefix: default_export_prefix(),
+            python_binary: default_python_binary(),
+            script_path: default_script_path(),
+            registers_days: default_registers_days(),
+            invoices_days: default_invoices_days(),
+            report_dir: default_report_dir(),
         }
     }
 }
@@ -111,6 +182,7 @@ impl Default for Config {
                 remote_dir: String::from("/home/atretyakov/okpo-agent/data/registers"),
             },
             agent: AgentConfig::default(),
+            test_check: TestCheckConfig::default(),
         }
     }
 }
@@ -166,10 +238,29 @@ impl Config {
                 bail!("agent.remote_command не должен быть пустым");
             }
         }
+        if self.test_check.remote_exports_dir.trim().is_empty() {
+            bail!("test_check.remote_exports_dir не должен быть пустым");
+        }
+        if self.test_check.python_binary.trim().is_empty() {
+            bail!("test_check.python_binary не должен быть пустым");
+        }
+        if self.test_check.script_path.trim().is_empty() {
+            bail!("test_check.script_path не должен быть пустым");
+        }
+        if self.test_check.report_dir.trim().is_empty() {
+            bail!("test_check.report_dir не должен быть пустым");
+        }
+        if self.test_check.export_prefix.trim().is_empty() {
+            bail!("test_check.export_prefix не должен быть пустым");
+        }
         Ok(())
     }
 
     pub fn tmp_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp")
+    }
+
+    pub fn project_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
 }

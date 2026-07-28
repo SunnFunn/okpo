@@ -1,9 +1,12 @@
 mod agent;
+mod assignments;
 mod config;
 mod discover;
 mod logging;
+mod report;
 mod schedule;
 mod ssh;
+mod test_check;
 mod transfer;
 
 use anyhow::Result;
@@ -34,12 +37,24 @@ struct Cli {
     /// (без mount). По умолчанию SFTP не делается: agent сам берёт файлы с `/data/registers`.
     #[arg(long)]
     skip_register_sync: bool,
+
+    /// Проверка расхождений дислокации и назначений: JSON с прод + 2 SQL + Excel
+    #[arg(long, conflicts_with_all = ["once", "file", "skip_register_sync", "skip_agent"])]
+    test_check: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let log_file = logging::init()?;
     let cli = Cli::parse();
+
+    if cli.test_check {
+        begin_run(&log_file)?;
+        let cfg = Config::load()?;
+        tracing::info!("режим --test-check: JSON-экспорт + SQL + Excel");
+        test_check::run(&cfg).await?;
+        return Ok(());
+    }
 
     // --file всегда подразумевает выгрузку по SFTP (старый путь).
     let skip_register_sync = cli.skip_register_sync || cli.file.is_some();

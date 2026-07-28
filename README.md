@@ -66,6 +66,9 @@ ssh_binary = "ssh"
 | `agent` | `working_directory` | `cd` на Ubuntu перед командой |
 | `agent` | `remote_command` | Базовая команда register на Ubuntu (`--skip-register-sync` дописывается только в запасном режиме) |
 | `agent` | `ssh_binary` | OpenSSH-клиент (`ssh` / `ssh.exe`) |
+| `test_check` | `remote_exports_dir` | Каталог JSON-экспортов на Ubuntu |
+| `test_check` | `python_binary` / `script_path` | Python и скрипт SQL для `--test-check` |
+| `test_check` | `report_dir` | Каталог Excel-отчёта |
 
 ## Два режима запуска
 
@@ -150,7 +153,39 @@ cd C:\Users\tretyakov_av\Apps\okpo
 
 :: один файл (SFTP + agent --skip-register-sync)
 .\target\release\okpo.exe --file "Реестр 22.07..xls"
+
+:: проверка расхождений (--test-check)
+.\target\release\okpo.exe --test-check
 ```
+
+## Режим `--test-check`
+
+Одноразовая проверка: вагоны, которые по дислокации едут на одну станцию, но уже назначены диспетчером под погрузку на другую, плюс сверка с последним JSON-экспортом парсинга.
+
+**Что делает:**
+1. По SFTP скачивает самый свежий `register_export_YYYY-MM-DD.json` из `test_check.remote_exports_dir` на Ubuntu в локальный `tmp/`.
+2. Запускает `test/assignments.py` (два SQL: реестр назначений + накладные) через Python/`pyodbc`.
+3. Дедуплицирует номера вагонов: приоритет `registers` → `invoices` → JSON-экспорт.
+4. Пишет Excel `tmp/test_check_YYYY-MM-DD.xlsx` (станции/коды/дороги из источника строки).
+
+**Требования:** `pyodbc` + ODBC Driver 18 for SQL Server; Windows под доменным пользователем с доступом к `MSKASUVPL` / `ASUVP_RAT`. Режим **не** запускает okpo-agent и **не** заливает реестры на прод.
+
+```bat
+cargo run -- --test-check
+cargo run --release -- --test-check
+.\target\release\okpo.exe --test-check
+```
+
+Секция `[test_check]` в `config.toml`:
+
+| Поле | Описание |
+|------|----------|
+| `remote_exports_dir` | Каталог JSON на Ubuntu |
+| `export_prefix` | Префикс имени (`register_export`) |
+| `python_binary` | Интерпретатор Python |
+| `script_path` | Путь к `test/assignments.py` |
+| `registers_days` / `invoices_days` | Глубина SQL-выборок |
+| `report_dir` | Куда писать Excel (обычно `tmp`) |
 
 ## Логика выбора файлов (только режим `--skip-register-sync` / `--file`)
 
@@ -205,6 +240,7 @@ cargo run -- --once
 | Запасной SFTP | `… --skip-register-sync` | UNC → SFTP, agent с `--skip-register-sync` |
 | Ручная загрузка | `okpo --file "…"` | Один файл по SFTP + agent с `--skip-register-sync` |
 | Без agent | `… --skip-agent` | Не запускать remote register |
+| Проверка | `okpo --test-check` | JSON с прод + 2 SQL + Excel-отчёт (без agent) |
 
 Флаг `--file` одноразовый: после прогона процесс завершается. Не комбинируется с `--once`.
 
