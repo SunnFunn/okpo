@@ -19,7 +19,7 @@ remote_dir = "/home/atretyakov/okpo-agent/data/registers"
 enabled = true
 remote_socks_port = 3128
 working_directory = "/home/atretyakov/okpo-agent"
-remote_command = "OKPO_SKIP_BUILD=1 ./run.sh prod register --dadata-parse"
+remote_command = "OKPO_SKIP_BUILD=1 OKPO_API_ENV=prod ./run.sh prod register --dadata-parse"
 ssh_binary = "ssh"
 
 # Режим --test-check: JSON-экспорт с прод + 2 SQL + Excel-отчёт
